@@ -1,150 +1,125 @@
 #include <errno.h>
-#include <stdlib.h>
-#include <stdio.h>
 #include <string.h>
 #include <unistd.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <netdb.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 
-fd_set activeSocks, readSocks, writeSocks;
-
-int maxSocketfd=0;
-int ids[100000];
-int maxfd = 0;
-
-char write_buff[200000] = {0};
-char read_buff[200000] = {0};
-
-void error_exit(const char *msg) 
+typedef struct s_client
 {
-	write(STDERR_FILENO, msg, strlen(msg));
-	close(0);
+	int		id;
+	char	msg[290000];
+} t_client;
+
+t_client	clients[1024];
+fd_set		read_set, write_set, current;
+int			maxfd = 0, gid = 0;
+char		send_buffer[300000], recv_buffer[300000];
+
+void err(char *msg)
+{
+	if(msg)
+		write(2, msg, strlen(msg));
+	else
+		write(2, "Fatal error", 11);
+	write(2, "\n", 1);
 	exit(1);
 }
 
-void notify(int who, char *msg)
+void notify(int excep)
 {
-	for (int fd = 0 ; fd <= maxSocketfd; fd++)
-		if(FD_ISSET(fd, &writeSocks) && fd != who)
-			send(fd, msg, strlen(msg), 0);
-
-}
-
-void add_it(int fd)
-{
-	maxSocketfd = fd > maxSocketfd ? fd : maxSocketfd;
-	ids[fd] = maxfd++;
-	FD_SET(fd, &activeSocks);
-	sprintf(write_buff, "server: client %d just arrived\n", ids[fd]);
-	notify(fd, write_buff);
-}
-
-void delete_it(int fd)
-{
-	sprintf(write_buff, "server: client %d just left\n", ids[fd]);
-	notify(fd, write_buff);
-	FD_CLR(fd, &activeSocks);
-	close(fd);
-}
-
-
-void send_msg(int fd)
-{
-	char msg[200000] = {0};
-	int j = 0;
-	int i = 0;
-
-	while(read_buff[i])
+	for (int fd = 0; fd <= maxfd; fd++)
 	{
-		msg[j++] = read_buff[i];
-		if(read_buff[i] =='\n' || read_buff[i + 1] == '\0')
-		{
-			bzero(&write_buff, sizeof(write_buff));
-			sprintf(write_buff, "client %d: %s", ids[fd], msg);
-			notify(fd, write_buff);
-			bzero(&msg, sizeof(msg));
-			j = 0;
-		}
-		i++;
+		if(FD_ISSET(fd, &write_set) && fd != excep)
+			if(send(fd, send_buffer, strlen(send_buffer), 0) == -1)
+				err(NULL);
 	}
-	bzero(&read_buff, sizeof(read_buff));
 }
 
-int main(int argc, char* argv[])
+int main(int argc, char *argv[]) 
 {
-	if (argc != 2) 
-	{
-        	error_exit("Wrong number of arguments\n");
-	}
-
-	int sockfd, port;
+	if(argc != 2)
+		err("Wrong number of arguments");
+	
+	
 	struct sockaddr_in servaddr;
+	socklen_t len;
 
-	sockfd = socket(AF_INET, SOCK_STREAM, 0);
-	if (sockfd == -1)
-	{
-		error_exit("Fatal error\n");
-	}
-	else
-	{
-		bzero(&servaddr, sizeof(servaddr));
-	}
+	// socket create and verification 
+	int serverfd = socket(AF_INET, SOCK_STREAM, 0); 
+	if (serverfd == -1)
+		err(NULL);
 
-	port = atoi(argv[1]);
-	
-	servaddr.sin_family = AF_INET;
+	maxfd = serverfd;
+
+	FD_ZERO(&current);
+	FD_SET(serverfd, &current);
+	bzero(clients, sizeof(clients));
+	bzero(&servaddr, sizeof(servaddr)); 
+
+	// assign IP, PORT 
+	servaddr.sin_family = AF_INET; 
 	servaddr.sin_addr.s_addr = htonl(2130706433); //127.0.0.1
-	servaddr.sin_port = htons(port);
-	
-	maxSocketfd = sockfd;
+	servaddr.sin_port = htons(atoi(argv[1])); 
+  
+	// Binding newly created socket to given IP and verification 
+	if ((bind(serverfd, (const struct sockaddr *)&servaddr, sizeof(servaddr))) == -1)
+		err(NULL);
 
-	if ((bind(sockfd, (const struct sockaddr *)&servaddr, sizeof(servaddr))) != 0) 
-	{
-		error_exit("Fatal error\n");
-	}
-	if (listen(sockfd, SOMAXCONN) != 0)
-	{
-		error_exit("fatal error\n");
-	}
-	FD_ZERO(&activeSocks);
-	FD_SET(sockfd, &activeSocks);
+	if (listen(serverfd, 100) == -1)
+		err(NULL);
+	
 	while(42)
 	{
-		readSocks=writeSocks=activeSocks;
-		
-		if (select(maxSocketfd + 1, &readSocks, &writeSocks, NULL, NULL) == -1)
+		read_set = write_set = current;
+		if(select(maxfd + 1, &read_set, &write_set, 0, 0) == -1)
 			continue;
-		for (int fd = sockfd; fd <= maxSocketfd; fd++)
+		for(int fd = 0; fd <= maxfd; fd++)
 		{
-			if (FD_ISSET(fd, &readSocks))
+			if(FD_ISSET(fd, &read_set))
 			{
-				if (fd == sockfd)
+				if (fd == serverfd)
 				{
-					socklen_t len = sizeof(servaddr);
-					int clientSocket = accept(sockfd, (struct sockaddr *)&servaddr, &len);
-					if(clientSocket == -1)
-						error_exit("Fatal error\n");
-					add_it(clientSocket);
-					break;
-				}
-				int bytes_read = 1000;
-				while(bytes_read == 1000 || read_buff[strlen(read_buff) - 1] != '\n')
+					int clientfd = accept(serverfd, (struct sockaddr *)&servaddr, &len);
+					if(clientfd == -1) continue;
+					if(clientfd > maxfd) maxfd = clientfd;
+					clients[clientfd].id = gid++;
+					FD_SET(clientfd, &current);
+					sprintf(send_buffer, "server: client %d just arrived\n", clients[clientfd].id);
+					notify(clientfd); 
+				}	
+				else
 				{
-					bytes_read = recv(fd, read_buff + strlen(read_buff), 1000, 0);
-					if (bytes_read <= 0)
-						break;
+					int ret = recv(fd, recv_buffer, sizeof(recv_buffer), 0);
+					if(ret <= 0)
+					{
+						sprintf(send_buffer, "server: client %d just left\n", clients[fd].id);
+						notify(fd);
+						FD_CLR(fd, &current);
+						close(fd);
+						bzero(clients[fd].msg, strlen(clients[fd].msg));
+					}
+					else
+					{
+						for (int i = 0, j = strlen(clients[fd].msg); i < ret; i++, j++)
+						{
+							clients[fd].msg[j] = recv_buffer[i];
+							if(clients[fd].msg[j] == '\n')
+							{
+								clients[fd].msg[j] = '\0';
+								sprintf(send_buffer, "client %d: %s\n", clients[fd].id, clients[fd].msg);
+								notify(fd);
+								bzero(clients[fd].msg, strlen(clients[fd].msg));
+								j = -1;
+							}
+						}
+					}
 				}
-				if (bytes_read <= 0)
-				{
-					send_msg(fd);
-					delete_it(fd);
-					break;
-				}
-				send_msg(fd);
+				break;
 			}
 		}
 	}
-return (0);
+	return (0);	
 }
-
